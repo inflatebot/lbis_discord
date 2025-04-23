@@ -27,7 +27,8 @@ The easiest way to use lbis-discord is to use [`uv`](https://docs.astral.sh/uv/)
 - `git clone https://github.com/inflatebot/lbis_discord`
 - `cd lbis_discord`
 - `uv run bot.py`
-If you insist on using a venv by yourself, `discord` should be the only package you need to install.
+
+If you insist on using a venv by yourself, `discord.py` should be the only package you need to install.
 
 When being run for the first time, the bot will generate a `bot.json` file. Open this file, and set:
     - `discord_token` to a valid bot token, see [Bot Setup](#bot-setup) below
