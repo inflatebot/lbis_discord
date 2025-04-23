@@ -13,5 +13,5 @@ dependencies = [
 lbis-bot = "bot:start"
 
 [tool.setuptools]
-py-modules = ["bot", "main", "state_manager"]
+py-modules = ["bot", "state_manager"]
 packages = ["cogs", "utils"]
