@@ -60,13 +60,13 @@ async def api_request(bot: 'lBISBot', endpoint: str, method: str = "GET", data: 
     return None
 
 async def get_api_pump_state(bot: 'lBISBot') -> Optional[bool]:
-    """Queries the API for the current pump state.
+    """Queries the API for the current pump state (PWM value).
 
     Args:
         bot: The bot instance.
 
     Returns:
-        True if the pump is on, False if off, None if state is unknown or API fails.
+        True if the pump duty cycle > 0, False if 0, None if state is unknown or API fails.
     """
     if not bot.device_base_url:
         logger.error("Device API base URL not configured. Cannot get pump status.")
@@ -80,23 +80,25 @@ async def get_api_pump_state(bot: 'lBISBot') -> Optional[bool]:
             logger.warning("get_api_pump_state: API request returned None")
             return None
 
-        # Handle potential text response first (API returns "0" or "1")
+        # Handle potential text response first (API returns float string like "0.00", "0.50")
         if 'message' in response_data:
             text_value = response_data['message']
             try:
-                return bool(int(text_value))
+                # Parse as float and check if > 0
+                return float(text_value) > 0.0
             except (ValueError, TypeError):
-                logger.error(f"get_api_pump_state: Could not parse text response '{text_value}' as int.")
+                logger.error(f"get_api_pump_state: Could not parse text response '{text_value}' as float.")
                 return None
-        # Handle potential numeric response (from api_request parsing)
+        # Handle potential numeric response (from api_request parsing - less likely now)
         elif 'value' in response_data:
              try:
-                return bool(int(response_data['value']))
+                 # Check if numeric value > 0
+                return float(response_data['value']) > 0.0
              except (ValueError, TypeError):
-                logger.error(f"get_api_pump_state: Could not parse numeric value '{response_data['value']}' as int.")
+                logger.error(f"get_api_pump_state: Could not parse numeric value '{response_data['value']}' as float.")
                 return None
-        # Handle potential JSON response as fallback
-        elif 'is_on' in response_data:
+        # Handle potential JSON response as fallback (unlikely for this endpoint now)
+        elif 'is_on' in response_data: # Keep for potential future API changes
             return bool(response_data.get('is_on'))
         else:
             logger.error(f"get_api_pump_state: Unexpected API response format: {response_data}")
