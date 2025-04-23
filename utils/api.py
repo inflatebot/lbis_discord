@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional
 
 # Added TYPE_CHECKING block for Bot hint
 if TYPE_CHECKING:
-    from discord_bot.bot import lBISBot
+    from bot import lBISBot
 
 logger = logging.getLogger(__name__)
 
