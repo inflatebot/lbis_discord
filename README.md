@@ -19,7 +19,7 @@ The bot is designed to be run on the wearer's PC, with the IP address of lBIS be
 - Enable the wearer to constrain the pump controls to specific users
 - Enable the wearer to designate users who can control the pump arbitrarily
 - Limit the amount of time an individual user can have banked
-- Provide a webhook to dynamically show the pump's state
+- Provide a nicer interface to dynamically show the pump's state
 
 ## Installation
 
@@ -43,23 +43,37 @@ When being run for the first time, the bot will generate a `bot.json` file. Open
 5. Under "Installation", click "Scopes" under "Guild Install", and click "Bot". Copy the Discord-provided install link, and save it somewhere.
 6. Open that link in a new tab and add it to a server.
 7. Set `wearer_secret` in `bot.json` to something; it can be whatever you want, as long as you store it safely. Restart the bot.
-7. DM the bot with "/set_wearer" alongside the secret you set. The bot should now DM you about its connection to lBIS, as well as tell you whenever someone uses a command. You will also be able to arbitrarily control the pump, reset and alter the session/bank, and set a latch on the pump to keep it from being activated.
+7. DM the bot with "/admin wearer" alongside the secret you set. The bot should now DM you about its connection to lBIS, as well as tell you whenever someone uses a command. You will also be able to arbitrarily control the pump, reset and alter the session/bank, and set a latch on the pump to keep it from being activated.
 
 ## Command Reference
 
 ### Pump Control
-- `/pump_on` - Wearer only. Does what you think it does.
-- `/pump_off` - Wearer only. Does what you think it does.
-- `/pump_timed` - Free usage. Turns on the pump for a provided number of seconds, up to a maximum of 60 (by default.)
-- `/pump_banked` - Wearer only. Similar to `/pump_timed`, but uses "banked time", see below.
-- `/latch` - Wearer only. Prevents the pump from being activated by any means under the bot's control. Can either be latched for a short period, or indefinitely. Can optionally set a reason for latching, which is displayed in the bot status.
+- `/inflate` - Inflates the wearer for a specified number of **seconds.** If running, adds to the timer, or to the Bank if the session time has run out.
+- `/inflate_debt` - Privileged only. Inflates the wearer for a specified number of **seconds,** decrementing from the Bank as it goes.
+- `/pump on` - Privileged only. Turns the pump on indefinitely.
+- `/pump off` - Privileged only. Turns the pump off.
+
+### Safety Latch
+The safety latch prevents the pump from being activated by any means. All latch controls are wearer-only.
+- `/latch on` - Turns the latch on, for an optional number of **minutes**, with an optional reason.
+- `/latch off` - Turns the latch off.
 
 ### Session Control
 All session control commands are wearer-only.
-- `/set_time` - Set the maximum time the pump can run without intervention, **in minutes.** You probably don't want to set this very high.
-- `/add_time` - Adds time to the session, **in minutes.**
-- `/reset_time` - Sets the session back to the default in `bot.json` (or what was last set with `/set_time`.)
+- `/session set` - Set the maximum time the pump can run without intervention, **in minutes.** You probably don't want to set this very high.
+- `/session add` - Adds time to the session, **in minutes.**
+- `/session rem` - Removes time from the session, **in minutes.**
+- `/session reset` - Sets the session back to the default in `bot.json` (or what was last set with `/session set`.)
 
 ### Bank
-- `/bank_time` - Wearer only. Manually add time to the bank.
-- `/reset_bank` - Default on your debt <sup><sub>, coward. /j</sup></sub>
+The "bank" allows pump time to be saved for later, if the session has run out or the pump is stopped mid-inflation. All bank control commands are wearer-only.
+- `/bank set` - Set the maximum time that can be banked.
+- `/bank add` - Wearer only. Manually add time to the bank, **in minutes.**
+- `/bank rem` - Wearer only. Manually remove time from the bank, **in minutes.**
+- `/bank reset` - Wearer only. Default on your debt <sup><sub>, coward. /j</sup></sub>
+
+### Administration
+- `/admin wearer` - Sets the user as the wearer, using the secret from `bot.json`. Only works in DMs.
+- `/admin reboot` - Wearer only. Reboots the lBIS device.
+- `/admin marco` - Check the connection to the lBIS API.
+- `/admin status` - Check lBIS' status.
