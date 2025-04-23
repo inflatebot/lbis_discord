@@ -62,4 +62,4 @@ All session control commands are wearer-only.
 
 ### Bank
 - `/bank_time` - Wearer only. Manually add time to the bank.
-- `/reset_bank` - Default on your debt, you dirty cheater.
+- `/reset_bank` - Default on your debt <sup><sub>, coward. /j</sup></sub>
