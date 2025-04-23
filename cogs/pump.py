@@ -352,7 +352,7 @@ class PumpGroup(app_commands.Group):
         super().__init__(name="pump", description="[Privileged Only] Manually control the pump.")
         self.bot = bot
 
-    @app_commands.command(name="on", description="[Privileged Only] Manually turns the pump ON (using stored intensity).")
+    @app_commands.command(name="on", description="[Privileged Only] Manually turns the pump ON.")
     @check_is_privileged()
     @dm_wearer_on_use("pump on")
     async def pump_on(self, interaction: discord.Interaction):
@@ -368,14 +368,33 @@ class PumpGroup(app_commands.Group):
 
     @app_commands.command(name="intensity", description="[Privileged Only] Sets the default pump intensity (0.0 to 1.0).")
     @check_is_privileged()
-    @app_commands.describe(intensity="Pump intensity (0.0 = off, 1.0 = full power). Affects /inflate and /inflate_debt.")
+    @app_commands.describe(intensity="Pump intensity (0.0 = off, 1.0 = full power).")
     @dm_wearer_on_use("pump intensity")
     async def pump_intensity(self, interaction: discord.Interaction, intensity: float):
         if not 0.0 <= intensity <= 1.0:
             await interaction.response.send_message("Intensity must be between 0.0 and 1.0.", ephemeral=True)
             return
-        # Use the helper to set intensity and save state
-        await _set_pump_intensity(self.bot, interaction, intensity)
+
+        # Update the default intensity state and save
+        self.bot.pump_intensity = intensity
+        save_session_state(self.bot)
+        logger.info(f"Pump intensity set to {intensity:.2f} by {interaction.user}.")
+        response_message = f"Pump intensity set to {intensity:.2f}."
+
+        # Check if a pump task is currently running
+        if self.bot.pump_task and not self.bot.pump_task.done():
+            logger.info(f"Pump task is running. Updating current intensity to {intensity:.2f} via API.")
+            # Call API to change the intensity of the currently running pump
+            if await api_request(self.bot, "setPumpState", method="POST", data={"pump": intensity}):
+                logger.info(f"Successfully updated running pump intensity to {intensity:.2f}.")
+                response_message += f"\nApplied intensity {intensity:.2f} to the currently running pump."
+            else:
+                logger.error(f"Failed to update running pump intensity to {intensity:.2f} via API.")
+                response_message += "\n⚠️ Failed to apply intensity to the currently running pump (API error)."
+
+        await interaction.response.send_message(response_message, ephemeral=True)
+        # Update status in case it reflects intensity
+        await self.bot.request_status_update()
 
 # --- Standalone Commands --- #
 
