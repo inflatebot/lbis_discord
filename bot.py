@@ -89,6 +89,9 @@ class lBISBot(commands.Bot):
         # Load Cogs
         cogs_dir = "cogs"
         for filename in os.listdir(cogs_dir):
+            # Skip core.py as its functionality has been moved
+            if filename == "core.py":
+                continue
             if filename.endswith(".py") and not filename.startswith("_"):
                 try:
                     await self.load_extension(f"{cogs_dir}.{filename[:-3]}")

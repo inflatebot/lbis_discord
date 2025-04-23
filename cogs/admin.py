@@ -4,120 +4,147 @@ from discord import app_commands
 import aiohttp
 import asyncio
 import logging
-from utils import is_wearer, dm_wearer_on_use, save_wearer_id, save_session_state, auto_unlatch, update_session_time, format_time
+import sys  # Import sys for restart
+import os  # Import os for restart
+
+from utils import (
+    is_wearer, dm_wearer_on_use, save_wearer_id, save_session_state,
+    auto_unlatch, update_session_time, format_time, check_is_wearer,
+    api_request, check_is_privileged  # Added imports
+)
 
 logger = logging.getLogger(__name__)
 
-class AdminCog(commands.Cog):
-    def __init__(self, bot):
+# --- Admin Command Group (Moved from core.py) --- #
+
+class AdminGroup(app_commands.Group):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(name="admin", description="Administrative commands.")
         self.bot = bot
 
-    @app_commands.command(name="restart", description="Restart the server (wearer only)")
-    @app_commands.check(is_wearer)
-    @dm_wearer_on_use("restart")
-    async def restart(self, interaction: discord.Interaction):
-        """Restart the server (wearer only)"""
-        await interaction.response.defer(thinking=True, ephemeral=True) # Acknowledge interaction ephemerally
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(f"{self.bot.API_BASE_URL}/api/restart", timeout=10) as response:
-                    # Response might be inconsistent on restart, primarily check reachability
-                    await interaction.followup.send("Restart command sent. Server may become temporarily unavailable.", ephemeral=True)
-                    # Optionally: Trigger a status update check after a short delay
-                    # asyncio.create_task(self.delayed_status_update(5))
-            except asyncio.TimeoutError:
-                 await interaction.followup.send("Restart command sent, but no response received (server might be restarting).", ephemeral=True)
-            except aiohttp.ClientConnectorError:
-                 await interaction.followup.send("Failed to reach server to send restart command.", ephemeral=True)
-            except Exception as e:
-                 await interaction.followup.send(f"An error occurred sending restart command: {e}", ephemeral=True)
+    @app_commands.command(name="marco", description="Check if the API server is responding")
+    async def marco(self, interaction: discord.Interaction):
+        """Check if the API server is responding"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.bot.API_BASE_URL}/api/marco", timeout=5) as response:
+                    if response.status == 200:
+                        data = await response.text()
+                        await interaction.response.send_message(f"Server says: {data}", ephemeral=True)
+                    else:
+                        await interaction.response.send_message(f"Server responded with status {response.status}", ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.response.send_message("Failed to reach server: Request timed out.", ephemeral=True)
+        except aiohttp.ClientConnectorError:
+            await interaction.response.send_message("Failed to reach server: Connection error.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"An unexpected error occurred: {e}", ephemeral=True)
 
-    @app_commands.command(name="set_wearer", description="Register yourself as this device's wearer (DM only, requires secret)")
+    @app_commands.command(name="status", description="Shows the current status of the bot and session.")
+    async def status(self, interaction: discord.Interaction):
+        """Displays the current status."""
+        # Check service reachability first
+        api_status = "Unknown"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.bot.API_BASE_URL}/api/getPumpState", timeout=5) as response:
+                    if response.status == 200:
+                        api_status = "Reachable"
+                    else:
+                        api_status = f"Error ({response.status})"
+        except Exception:
+            api_status = "Unreachable"  # Service likely down
+
+        # Session Info
+        session_time_str = format_time(self.bot.session_time_remaining)
+        banked_time_str = format_time(self.bot.banked_time)
+        latch_status = "Latched" if self.bot.latch_active else "Unlatched"
+        latch_reason_str = f" ({self.bot.latch_reason})" if self.bot.latch_reason else ""
+        latch_status += latch_reason_str
+        pump_status = "Unknown"
+
+        if self.bot.last_pump_time:
+            # Check if a pump task is running
+            if self.bot.pump_task and not self.bot.pump_task.done():
+                pump_status = "ON (Timed/Banked)"
+            else:
+                # Check API for actual pump state if no task is running
+                pump_state = await api_request(self.bot, "getPumpState")
+                if pump_state is not None:
+                    try:
+                        # Handle both text ("0"/"1") and JSON responses
+                        if isinstance(pump_state, dict):
+                            pump_status = "ON" if pump_state.get('is_on') else "OFF"
+                        else:
+                            # Try to convert text value to bool
+                            try:
+                                is_on = bool(int(str(pump_state)))
+                                pump_status = "ON" if is_on else "OFF"
+                            except (ValueError, TypeError):
+                                pump_status = "UNKNOWN"
+                    except Exception as e:
+                        logger.error(f"Failed to parse pump state: {e}")
+                        pump_status = "UNKNOWN"
+                else:
+                    pump_status = "OFF (API check failed)"
+        else:
+            pump_status = "OFF (Never run)"
+
+        embed = discord.Embed(title="lBIS Status", color=discord.Color.blue())
+        embed.add_field(name="API Service", value=api_status, inline=False)
+        embed.add_field(name="Session Time", value=session_time_str, inline=True)
+        embed.add_field(name="Banked Time", value=banked_time_str, inline=True)
+        embed.add_field(name="Latch", value=latch_status, inline=True)
+        embed.add_field(name="Pump", value=pump_status, inline=True)
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="reboot", description="[Privileged Only] Restarts the bot.")
+    @check_is_privileged()
+    @dm_wearer_on_use("admin reboot")
+    async def reboot(self, interaction: discord.Interaction):
+        """Restarts the bot application."""
+        await interaction.response.send_message("Rebooting...", ephemeral=True)
+        logger.warning(f"Reboot initiated by {interaction.user} ({interaction.user.id})")
+        # Ensure session state is saved before exiting
+        from utils import save_session_state  # Local import to avoid circular dependency if moved
+        save_session_state(self.bot)
+        logger.info("Session state saved before reboot.")
+        # Use os.execv to replace the current process with a new instance
+        os.execv(sys.executable, ['python'] + sys.argv)
+
+    @app_commands.command(name="wearer", description="Register yourself as this device's wearer (DM only, requires secret)")
     @app_commands.describe(secret="Your secret")
-    async def set_wearer(self, interaction: discord.Interaction, secret: str):
-        """Register yourself as this device's wearer (DM only, requires secret)"""
+    async def wearer(self, interaction: discord.Interaction, secret: str):
+        """Registers the user as the wearer if the secret is correct."""
         if interaction.guild is not None:
             await interaction.response.send_message("This command can only be used in DMs.", ephemeral=True)
             return
 
-        # Access OWNER_SECRET from bot's config
+        # Access wearer_secret from bot's config
         if secret == self.bot.config.get("wearer_secret"):
-            self.bot.OWNER_ID = interaction.user.id
-            save_wearer_id(self.bot, interaction.user.id) # Pass bot object
-            await self.bot.request_status_update() # Use bot method
+            # Update config directly if needed, or just save
+            self.bot.config['wearer_id'] = interaction.user.id  # Update config in memory
+            save_wearer_id(self.bot, interaction.user.id)  # Save to bot.json
+            await self.bot.request_status_update()  # Use bot method
             await interaction.response.send_message("You are now registered as this device's wearer!", ephemeral=True)
+            logger.info(f"Wearer registered: {interaction.user} ({interaction.user.id})")
         else:
             await interaction.response.send_message("Incorrect secret.", ephemeral=True)
+            logger.warning(f"Incorrect secret provided by {interaction.user} ({interaction.user.id}) for set_wearer.")
 
-    @app_commands.command(name="latch", description="Toggle, set, or time-limit the pump latch (wearer only).")
-    @app_commands.check(is_wearer)
-    @app_commands.describe(
-        state="Optional: Set to true to latch, false to unlatch. Omit to toggle.",
-        minutes="Optional: Number of minutes to latch for (positive integer)",
-        reason="Optional: Reason for latching (max 100 chars)"
-    )
-    async def latch(self, interaction: discord.Interaction, state: bool = None, minutes: app_commands.Range[int, 1] = None, reason: app_commands.Range[str, 0, 100] = None):
-        """Toggle, set, or time-limit the pump latch (wearer only)."""
+# --- Bank Command Group --- #
 
-        # Determine new latch state
-        new_state = not self.bot.latch_active if state is None else state
+class BankGroup(app_commands.Group):
+    def __init__(self, bot: commands.Bot):
+        super().__init__(name="bank", description="Manage the banked time.")
+        self.bot = bot
 
-        # Cancel existing timer if any
-        if self.bot.latch_timer:
-            self.bot.latch_timer.cancel()
-            self.bot.latch_timer = None
-            self.bot.latch_end_time = None
-
-        self.bot.latch_active = new_state
-        self.bot.latch_reason = reason if new_state else None # Set reason only if latching
-        status_message = "latched" if new_state else "unlatched"
-
-        # If latching, ensure pump is off
-        if new_state:
-            # async with aiohttp.ClientSession() as session:
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(
-                        f"{self.bot.API_BASE_URL}/api/setPumpState",
-                        json={"pump": 0},
-                        timeout=10
-                    ) as response:
-                        if response.status != 200:
-                            await interaction.response.send_message(f"Warning: Failed to turn pump off while latching (Server status: {response.status}). Latch applied anyway.", ephemeral=True)
-                            # Continue latching even if pump off fails
-                        # else: Pump turned off successfully
-                except Exception as e:
-                     await interaction.response.send_message(f"Warning: Error contacting server to turn pump off while latching: {e}. Latch applied anyway.", ephemeral=True)
-                     # Continue latching
-
-            # Set up timed unlatch if minutes specified
-            if minutes is not None and minutes > 0:
-                self.bot.latch_end_time = asyncio.get_event_loop().time() + (minutes * 60)
-                # Pass bot object to auto_unlatch
-                self.bot.latch_timer = asyncio.create_task(auto_unlatch(self.bot, minutes * 60))
-                status_message = f"{status_message} for {minutes} minutes"
-                if reason:
-                    status_message += f" (Reason: {reason})"
-            elif reason: # Latching indefinitely with reason
-                 status_message += f" (Reason: {reason})"
-
-        else: # Unlatching
-             self.bot.latch_end_time = None # Clear end time when unlatching manually
-             self.bot.latch_reason = None # Clear reason when unlatching
-
-        save_session_state(self.bot)
-        await self.bot.request_status_update() # Use bot method
-        # Use followup if we sent a warning message before
-        if interaction.response.is_done():
-             await interaction.followup.send(f"Pump is now {status_message}.", ephemeral=True)
-        else:
-             await interaction.response.send_message(f"Pump is now {status_message}.", ephemeral=True)
-
-    @app_commands.command(name="bank_time", description="[Wearer Only] Manually add time to the bank.")
-    @app_commands.check(is_wearer)
+    @app_commands.command(name="add", description="[Wearer Only] Manually add time to the bank.")
+    @check_is_wearer()
     @app_commands.describe(seconds="Number of seconds to add to the bank.")
-    async def bank_time(self, interaction: discord.Interaction, seconds: int):
-        """Manually adds time to the banked time pool."""
+    @dm_wearer_on_use("bank add")
+    async def add(self, interaction: discord.Interaction, seconds: int):
         if seconds <= 0:
             await interaction.response.send_message("Please provide a positive number of seconds.", ephemeral=True)
             return
@@ -135,13 +162,57 @@ class AdminCog(commands.Cog):
             f"Total banked time is now {format_time(self.bot.banked_time)}.",
             ephemeral=True
         )
-        # Use bot method for status update
         await self.bot.request_status_update()
 
-    @app_commands.command(name="reset_bank", description="[Wearer Only] Resets the banked time to zero.")
-    @app_commands.check(is_wearer)
-    async def reset_bank(self, interaction: discord.Interaction):
-        """Resets the banked time pool to zero."""
+    @app_commands.command(name="rem", description="[Wearer Only] Manually remove time from the bank.")
+    @check_is_wearer()
+    @app_commands.describe(seconds="Number of seconds to remove from the bank.")
+    @dm_wearer_on_use("bank rem")
+    async def rem(self, interaction: discord.Interaction, seconds: int):
+        if seconds <= 0:
+            await interaction.response.send_message("Please provide a positive number of seconds.", ephemeral=True)
+            return
+
+        old_banked_time = self.bot.banked_time
+        self.bot.banked_time = max(0, old_banked_time - seconds)
+        removed_time = old_banked_time - self.bot.banked_time
+
+        save_session_state(self.bot)
+        logger.info(f"Wearer manually removed {removed_time}s from bank. New banked time: {self.bot.banked_time}s.")
+
+        await interaction.response.send_message(
+            f"Removed {format_time(removed_time)} from the bank. "
+            f"Total banked time is now {format_time(self.bot.banked_time)}.",
+            ephemeral=True
+        )
+        await self.bot.request_status_update()
+
+    @app_commands.command(name="set", description="[Wearer Only] Manually set the banked time.")
+    @check_is_wearer()
+    @app_commands.describe(seconds="Number of seconds to set the bank to.")
+    @dm_wearer_on_use("bank set")
+    async def set(self, interaction: discord.Interaction, seconds: int):
+        if seconds < 0:
+            await interaction.response.send_message("Please provide a non-negative number of seconds.", ephemeral=True)
+            return
+
+        max_bank = self.bot.config.get('max_banked_time', 3600)
+        old_banked_time = self.bot.banked_time
+        self.bot.banked_time = min(seconds, max_bank)
+
+        save_session_state(self.bot)
+        logger.info(f"Wearer manually set bank time to {self.bot.banked_time}s (was {old_banked_time}s). Limit was {max_bank}s.")
+
+        await interaction.response.send_message(
+            f"Banked time set to {format_time(self.bot.banked_time)}.",
+            ephemeral=True
+        )
+        await self.bot.request_status_update()
+
+    @app_commands.command(name="reset", description="[Wearer Only] Resets the banked time to zero.")
+    @check_is_wearer()
+    @dm_wearer_on_use("bank reset")
+    async def reset(self, interaction: discord.Interaction):
         old_banked_time = self.bot.banked_time
         self.bot.banked_time = 0
         save_session_state(self.bot)
@@ -151,8 +222,21 @@ class AdminCog(commands.Cog):
             f"Banked time has been reset to 0 (was {format_time(old_banked_time)}).",
             ephemeral=True
         )
-        # Use bot method for status update
         await self.bot.request_status_update()
 
+# --- Admin Cog --- #
+
+class AdminCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Add the command groups
+        bot.tree.add_command(BankGroup(bot))
+        bot.tree.add_command(AdminGroup(bot))  # Added AdminGroup
+
+    async def cog_unload(self):
+        # Remove the command groups
+        self.bot.tree.remove_command("bank")
+        self.bot.tree.remove_command("admin")  # Added AdminGroup removal
+
 async def setup(bot):
-  await bot.add_cog(AdminCog(bot))
+    await bot.add_cog(AdminCog(bot))
