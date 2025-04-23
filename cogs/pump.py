@@ -257,13 +257,13 @@ async def _start_timed_pump(bot, interaction: discord.Interaction, seconds: int)
             await interaction.response.send_message("Cannot run pump (calculated duration is zero, likely no session time).", ephemeral=True)
             return
 
-        logger.info(f"Starting new timed pump for {run_seconds}s.")
-        if await api_request(bot, "setPumpState", method="POST", data={"pump": 1}):
+        logger.info(f"Starting new timed pump for {run_seconds}s at intensity {bot.pump_intensity:.2f}.")
+        if await api_request(bot, "setPumpState", method="POST", data={"pump": bot.pump_intensity}):
             bot.last_pump_time = time.time()
             bot.pump_task_end_time = current_time + run_seconds
             bot.pump_task = asyncio.create_task(_timed_pump_loop(bot, run_seconds))
 
-            response_message = f"Pump started for {format_time(run_seconds)} using session time."
+            response_message = f"Pump started for {format_time(run_seconds)} at intensity {bot.pump_intensity:.2f} using session time."
             if run_seconds < seconds:
                 response_message += f" (Limited by session time)."
             await interaction.response.send_message(response_message)
@@ -305,13 +305,13 @@ async def _start_banked_pump(bot, interaction: discord.Interaction, seconds: int
         await interaction.response.send_message("Cannot run pump (calculated duration is zero based on available time).", ephemeral=True)
         return
 
-    logger.info(f"Starting banked pump for {run_seconds}s.")
-    if await api_request(bot, "setPumpState", method="POST", data={"pump": 1}):
+    logger.info(f"Starting banked pump for {run_seconds}s at intensity {bot.pump_intensity:.2f}.")
+    if await api_request(bot, "setPumpState", method="POST", data={"pump": bot.pump_intensity}):
         bot.last_pump_time = time.time()
         bot.pump_task_end_time = asyncio.get_event_loop().time() + run_seconds
         bot.pump_task = asyncio.create_task(_banked_pump_loop(bot, run_seconds))
 
-        response_message = f"Pump started using banked time for {format_time(run_seconds)}."
+        response_message = f"Pump started using banked time for {format_time(run_seconds)} at intensity {bot.pump_intensity:.2f}."
         if run_seconds < seconds:
             response_message += f" (Limited by bank, session time, or max duration)."
         await interaction.response.send_message(response_message)
@@ -320,31 +320,30 @@ async def _start_banked_pump(bot, interaction: discord.Interaction, seconds: int
     else:
         await interaction.response.send_message("Failed to start pump via API.", ephemeral=True)
 
-async def _start_manual_pump(bot, interaction: discord.Interaction):
+async def _set_pump_intensity(bot, interaction: discord.Interaction, intensity: float):
+    """Helper function to set pump intensity via API and update state."""
+    # Cancel any running timed pump task first
     if bot.pump_task and not bot.pump_task.done():
         bot.pump_task.cancel()
-        logger.info("Cancelled running pump task due to manual pump start.")
+        logger.info("Cancelled running pump task due to manual intensity change.")
+        # Wait briefly for cancellation to potentially process before sending new state
+        await asyncio.sleep(0.1)
 
-    if await api_request(bot, "setPumpState", method="POST", data={"pump": 1}):
+    if await api_request(bot, "setPumpState", method="POST", data={"pump": intensity}):
         bot.last_pump_time = time.time()
+        bot.pump_intensity = intensity  # Update bot state
         save_session_state(bot)
-        await interaction.response.send_message("Pump turned ON manually.", ephemeral=True)
+        state_str = "OFF" if intensity == 0.0 else f"ON (Intensity: {intensity:.2f})"
+        await interaction.response.send_message(f"Pump set to {state_str}.", ephemeral=True)
         await bot.request_status_update()
     else:
-        await interaction.response.send_message("Failed to turn pump ON via API.", ephemeral=True)
+        await interaction.response.send_message("Failed to set pump intensity via API.", ephemeral=True)
+
+async def _start_manual_pump(bot, interaction: discord.Interaction):
+    await _set_pump_intensity(bot, interaction, 1.0)
 
 async def _stop_manual_pump(bot, interaction: discord.Interaction):
-    if bot.pump_task and not bot.pump_task.done():
-        bot.pump_task.cancel()
-        logger.info("Cancelled running pump task due to manual stop command.")
-
-    if await api_request(bot, "setPumpState", method="POST", data={"pump": 0}):
-        bot.last_pump_time = time.time()
-        save_session_state(bot)
-        await interaction.response.send_message("Pump turned OFF.", ephemeral=True)
-        await bot.request_status_update()
-    else:
-        await interaction.response.send_message("Failed to turn pump OFF via API.", ephemeral=True)
+    await _set_pump_intensity(bot, interaction, 0.0)
 
 # --- Pump Command Group --- #
 
@@ -353,17 +352,30 @@ class PumpGroup(app_commands.Group):
         super().__init__(name="pump", description="[Privileged Only] Manually control the pump.")
         self.bot = bot
 
-    @app_commands.command(name="on", description="[Privileged Only] Manually turns the pump ON.")
+    @app_commands.command(name="on", description="[Privileged Only] Manually turns the pump ON (using stored intensity).")
     @check_is_privileged()
     @dm_wearer_on_use("pump on")
     async def pump_on(self, interaction: discord.Interaction):
-        await _start_manual_pump(self.bot, interaction)
+        # Use the stored intensity
+        await _set_pump_intensity(self.bot, interaction, self.bot.pump_intensity)
 
     @app_commands.command(name="off", description="[Privileged Only] Manually turns the pump OFF.")
     @check_is_privileged()
     @dm_wearer_on_use("pump off")
     async def pump_off(self, interaction: discord.Interaction):
-        await _stop_manual_pump(self.bot, interaction)
+        # Keep this setting intensity to 0.0 explicitly
+        await _set_pump_intensity(self.bot, interaction, 0.0)
+
+    @app_commands.command(name="intensity", description="[Privileged Only] Sets the default pump intensity (0.0 to 1.0).")
+    @check_is_privileged()
+    @app_commands.describe(intensity="Pump intensity (0.0 = off, 1.0 = full power). Affects /inflate and /inflate_debt.")
+    @dm_wearer_on_use("pump intensity")
+    async def pump_intensity(self, interaction: discord.Interaction, intensity: float):
+        if not 0.0 <= intensity <= 1.0:
+            await interaction.response.send_message("Intensity must be between 0.0 and 1.0.", ephemeral=True)
+            return
+        # Use the helper to set intensity and save state
+        await _set_pump_intensity(self.bot, interaction, intensity)
 
 # --- Standalone Commands --- #
 

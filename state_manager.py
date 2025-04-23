@@ -32,6 +32,7 @@ class StateManager:
             'latch_active': False,
             'latch_end_time': None,
             'latch_reason': None,
+            'pump_intensity': 1.0, # Add pump intensity state
         }
         self.load_state()
 
@@ -62,11 +63,14 @@ class StateManager:
                 'latch_active': False,
                 'latch_end_time': None,
                 'latch_reason': None,
+                'pump_intensity': 1.0, # Add pump intensity state
             }
         # Ensure default_session_time is correctly set even if loaded from file
         if 'default_session_time' not in self.state or self.state['default_session_time'] is None:
              self.state['default_session_time'] = self.default_initial_time
-
+        # Ensure pump_intensity exists and is valid
+        if 'pump_intensity' not in self.state or not isinstance(self.state['pump_intensity'], (int, float)) or not (0.0 <= self.state['pump_intensity'] <= 1.0):
+            self.state['pump_intensity'] = 1.0 # Default to 1.0 if invalid or missing
 
     def save_state(self):
         """Atomically save the current state dictionary to the JSON file."""
