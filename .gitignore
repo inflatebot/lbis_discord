@@ -1,0 +1,10 @@
+.editorconfig
+.copilot-notes.md
+.vscode/extensions.json
+.vscode/settings.json
+bot.json
+session.json
+__pycache__/
+utils/__pycache__/
+cogs/__pycache__/
+.venv/
