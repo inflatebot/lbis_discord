@@ -73,6 +73,7 @@ class lBISBot(commands.Bot):
         self.pump_task: asyncio.Task | None = None  # Added: Reference to the running pump task
         self.pump_task_end_time: float | None = None  # Added: Target end time for the pump task
         self.pump_intensity: float = 1.0  # Added: Current pump intensity (0.0 to 1.0)
+        self.current_pump_state: float | None = None # Added: Latest state received from WebSocket
 
         # WebSocket State (Renamed to avoid conflict with discord.py internal 'ws')
         self.lbis_ws: aiohttp.ClientWebSocketResponse | None = None
@@ -109,9 +110,24 @@ class lBISBot(commands.Bot):
 
                         # Keep connection alive and handle potential incoming messages (optional)
                         async for msg in ws:
-                            # Currently, firmware doesn't send messages, but good practice to handle
+                            # Process incoming messages for state updates
                             if msg.type == aiohttp.WSMsgType.TEXT:
-                                logger.debug(f"WebSocket received text: {msg.data}")
+                                try:
+                                    data = json.loads(msg.data)
+                                    if isinstance(data, dict) and 'state' in data:
+                                        try:
+                                            new_state = float(data['state'])
+                                            if self.current_pump_state != new_state:
+                                                self.current_pump_state = new_state
+                                                logger.info(f"WebSocket updated pump state to: {self.current_pump_state:.2f}")
+                                                # Trigger status update in MonitorCog
+                                                await self.request_status_update()
+                                        except (ValueError, TypeError):
+                                             logger.warning(f"WebSocket received invalid state value: {data['state']}")
+                                    else:
+                                         logger.debug(f"WebSocket received non-state JSON: {msg.data}")
+                                except json.JSONDecodeError:
+                                    logger.warning(f"WebSocket received non-JSON text message: {msg.data}")
                             elif msg.type == aiohttp.WSMsgType.ERROR:
                                 logger.error(f"WebSocket error received: {ws.exception()}")
                                 break # Exit inner loop on error

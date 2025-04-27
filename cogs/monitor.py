@@ -26,6 +26,12 @@ class MonitorCog(commands.Cog):
 
     async def update_bot_status(self):
         """Updates the bot's Discord presence based on current state."""
+        # Add checks for bot validity early
+        if self.bot is None or self.bot.is_closed():
+            logger.warning("update_bot_status called but bot is None or closed. Skipping presence update.")
+            return
+
+        # Existing check for readiness and service status
         if not self.bot.is_ready() or not self.bot.service_was_up:
             status = discord.Status.dnd # Do Not Disturb if not ready or API down
             activity_string = "API Down" if not self.bot.service_was_up else "Starting..."
@@ -37,24 +43,35 @@ class MonitorCog(commands.Cog):
             latch_str = "🔒" if self.bot.latch_active else ""
 
             pump_state_str = ""
-            if self.bot.pump_task and not self.bot.pump_task.done():
+            # Prioritize WebSocket state if available
+            if self.bot.current_pump_state is not None:
+                pump_state_str = "ON" if self.bot.current_pump_state > 0 else "OFF"
+            # Fallback: Check if a bot-controlled task is running
+            elif self.bot.pump_task and not self.bot.pump_task.done():
                 pump_state_str = "ON" # If task is running, it must be ON
             else:
-                # We can no longer reliably get the state via HTTP.
-                # Assume OFF if no task is running. The bot is the source of truth.
-                # If the pump was left on manually before a bot restart, this might be inaccurate
-                # until a new command is issued.
+                # Fallback: Assume OFF if no task and no WS state
+                # This might be inaccurate if the pump was left on manually before a bot restart
+                # and the WS hasn't connected/reported yet.
                 pump_state_str = "OFF"
-                # TODO: Consider adding a mechanism in firmware to report state on WS connect?
 
             activity_string = f"{latch_str}Pump: {pump_state_str} | Sess: {session_str} | Bank: {banked_str}"
             activity = discord.CustomActivity(name=activity_string)
 
         try:
+            # Add a more specific check for the internal websocket
+            if self.bot.ws is None:
+                logger.warning("update_bot_status called but bot.ws is None. Skipping presence update.")
+                return
+            # The self.bot is None check is now redundant here due to the check at the top
             await self.bot.change_presence(status=status, activity=activity)
             logger.debug(f"Updated presence: {status}, Activity: {activity_string}")
         except Exception as e:
-            logger.error(f"Failed to update presence: {e}")
+            # Log specific discord errors if helpful
+            if isinstance(e, discord.errors.ConnectionClosed):
+                 logger.warning(f"Failed to update presence due to connection closed: {e}")
+            else:
+                 logger.error(f"Failed to update presence: {e}", exc_info=True) # Add exc_info for more details
 
     @tasks.loop(seconds=15)
     async def service_monitor_task(self):
