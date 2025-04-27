@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import aiohttp
 import asyncio
 import logging
-from utils import format_time, api_request, save_session_state, update_session_time, get_api_pump_state
+from utils import format_time, api_request, save_session_state, update_session_time
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +40,12 @@ class MonitorCog(commands.Cog):
             if self.bot.pump_task and not self.bot.pump_task.done():
                 pump_state_str = "ON" # If task is running, it must be ON
             else:
-                pump_is_on = await get_api_pump_state(self.bot)
-                if pump_is_on is None:
-                    pump_state_str = "UNKNOWN"
-                else:
-                    pump_state_str = "ON" if pump_is_on else "OFF"
+                # We can no longer reliably get the state via HTTP.
+                # Assume OFF if no task is running. The bot is the source of truth.
+                # If the pump was left on manually before a bot restart, this might be inaccurate
+                # until a new command is issued.
+                pump_state_str = "OFF"
+                # TODO: Consider adding a mechanism in firmware to report state on WS connect?
 
             activity_string = f"{latch_str}Pump: {pump_state_str} | Sess: {session_str} | Bank: {banked_str}"
             activity = discord.CustomActivity(name=activity_string)
@@ -99,21 +100,25 @@ class MonitorCog(commands.Cog):
 
         if not self.bot.device_base_url:
             logger.warning("Device base URL not set, cannot enforce pump state for session timer.")
+            # No return here, session time still needs to decrement if pump task is running
 
-        is_manually_on = False
-        if not (self.bot.pump_task and not self.bot.pump_task.done()):
-            pump_is_on = await get_api_pump_state(self.bot)
-            if pump_is_on is True: # Explicitly check for True
-                is_manually_on = True
-            elif pump_is_on is None:
-                logger.warning("Session timer: Could not determine pump state from API.")
+        # Determine if the pump *should* be running based on the bot's task state
+        is_controlled_on = self.bot.pump_task and not self.bot.pump_task.done()
 
-        if is_manually_on:
+        # If the pump is supposed to be on (controlled by the bot),
+        # decrement session time.
+        if is_controlled_on:
             if self.bot.session_time_remaining > 0:
                 update_session_time(self.bot, -1)
                 if self.bot.session_time_remaining == 0:
-                    logger.info("Session time reached zero while pump was manually on.")
-                    await self.update_bot_status()
+                    logger.info("Session time reached zero while pump task was active.")
+                    # The pump task itself should handle stopping the pump when time runs out or is interrupted.
+                    await self.update_bot_status() # Update status immediately
+            # else: Session time already zero, pump task should stop itself soon.
+        # else: Pump is not controlled by a bot task, so don't decrement session time.
+        # This implicitly handles the case where the pump might be on manually
+        # (e.g., if started before bot connected or via another interface).
+        # Session time only decreases when the bot *intends* the pump to be on.
 
     @session_timer.before_loop
     async def before_session_timer(self):

@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 async def api_request(bot: 'lBISBot', endpoint: str, method: str = "GET", data: dict = None, timeout: int = 5) -> dict | None:
     """
     Make a request to the lBIS API.
+    NOTE: Pump control endpoints (setPumpState, getPumpState) should now use WebSockets.
 
     Args:
         bot: The bot instance containing API_BASE_URL
@@ -27,6 +28,12 @@ async def api_request(bot: 'lBISBot', endpoint: str, method: str = "GET", data: 
         Response data as dict if successful and response has data
         None if request failed or had no data
     """
+    # Add a check or warning if trying to use this for pump endpoints
+    if endpoint in ["setPumpState", "getPumpState"]:
+         logger.warning(f"Attempted to use api_request for deprecated endpoint: {endpoint}. Use WebSocket instead.")
+         # Optionally return None or raise an error
+         # return None
+
     url = f"{bot.API_BASE_URL}/api/{endpoint}"
     try:
         async with aiohttp.ClientSession() as session:
@@ -58,48 +65,3 @@ async def api_request(bot: 'lBISBot', endpoint: str, method: str = "GET", data: 
         logger.error(f"API request to {endpoint} failed with error: {e}")
 
     return None
-
-async def get_api_pump_state(bot: 'lBISBot') -> Optional[bool]:
-    """Queries the API for the current pump state (PWM value).
-
-    Args:
-        bot: The bot instance.
-
-    Returns:
-        True if the pump duty cycle > 0, False if 0, None if state is unknown or API fails.
-    """
-    if not bot.device_base_url:
-        logger.error("Device API base URL not configured. Cannot get pump status.")
-        return None
-
-    try:
-        # Use the existing api_request helper
-        response_data = await api_request(bot, "getPumpState", method="GET")
-
-        if response_data is None:
-            logger.warning("get_api_pump_state: API request returned None")
-            return None
-
-        # Expect {"state": float_value} from api_request now
-        if 'state' in response_data:
-            state_value = response_data['state']
-            try:
-                # Ensure state_value is treated as a float
-                pump_value = float(state_value)
-                return pump_value > 0.0
-            except (ValueError, TypeError) as parse_error:
-                # Log the specific parsing error
-                logger.error(f"get_api_pump_state: Could not parse state value '{state_value}' as float: {parse_error}")
-                return None
-        # Keep fallback for potential future API changes
-        elif 'is_on' in response_data:
-             return bool(response_data.get('is_on'))
-        else:
-            # Log if the expected 'state' key is missing
-            logger.error(f"get_api_pump_state: Unexpected API response format (expected 'state'): {response_data}")
-            return None
-
-    except Exception as e:
-        # Catch any other unexpected error during the process
-        logger.error(f"get_api_pump_state: Failed to check pump status: {e}", exc_info=True) # Add exc_info for traceback
-        return None

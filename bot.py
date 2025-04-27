@@ -5,6 +5,7 @@ import json
 import asyncio
 import logging  # Import logging
 from discord import app_commands  # Added for error handling
+import aiohttp # Added for WebSocket
 
 # Local imports
 import utils  # Import the utils module
@@ -73,6 +74,13 @@ class lBISBot(commands.Bot):
         self.pump_task_end_time: float | None = None  # Added: Target end time for the pump task
         self.pump_intensity: float = 1.0  # Added: Current pump intensity (0.0 to 1.0)
 
+        # WebSocket State (Renamed to avoid conflict with discord.py internal 'ws')
+        self.lbis_ws: aiohttp.ClientWebSocketResponse | None = None
+        self.lbis_ws_url = f"ws://{self.API_BASE_URL.split('//')[1]}/ws/pump" # Construct WS URL
+        self.lbis_ws_lock = asyncio.Lock()
+        self._lbis_ws_ready = asyncio.Event() # Event to signal WS readiness
+        self._lbis_ws_manager_task: asyncio.Task | None = None # Task for managing WS connection
+
         # Load persistent state
         utils.load_session_state(self)  # Pass self (the bot instance)
 
@@ -86,7 +94,81 @@ class lBISBot(commands.Bot):
             # Log if the cog isn't loaded for some reason
             logging.warning("Tried to request status update, but MonitorCog is not loaded.")
 
+    # --- WebSocket Management ---
+
+    async def _ws_manager(self):
+        """Manages the WebSocket connection lifecycle."""
+        while not self.is_closed():
+            try:
+                logger.info(f"Attempting to connect WebSocket to {self.lbis_ws_url}...")
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(self.lbis_ws_url, timeout=10) as ws:
+                        logger.info("WebSocket connected successfully.")
+                        self.lbis_ws = ws
+                        self._lbis_ws_ready.set() # Signal that WS is ready
+
+                        # Keep connection alive and handle potential incoming messages (optional)
+                        async for msg in ws:
+                            # Currently, firmware doesn't send messages, but good practice to handle
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                logger.debug(f"WebSocket received text: {msg.data}")
+                            elif msg.type == aiohttp.WSMsgType.ERROR:
+                                logger.error(f"WebSocket error received: {ws.exception()}")
+                                break # Exit inner loop on error
+                            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                                logger.warning("WebSocket connection closed by server.")
+                                break # Exit inner loop if closed
+
+            except aiohttp.ClientConnectorError as e:
+                logger.warning(f"WebSocket connection failed: {e}. Retrying in 15s...")
+            except asyncio.TimeoutError:
+                logger.warning("WebSocket connection timed out. Retrying in 15s...")
+            except Exception as e:
+                logger.error(f"Unexpected WebSocket error: {e}. Retrying in 15s...", exc_info=True)
+
+            # Cleanup before retry
+            async with self.lbis_ws_lock:
+                self.lbis_ws = None
+                self._lbis_ws_ready.clear()
+            await asyncio.sleep(15) # Wait before retrying
+
+    async def ensure_ws_connection(self, timeout=10):
+        """Waits for the WebSocket connection to be ready."""
+        try:
+            await asyncio.wait_for(self._lbis_ws_ready.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"Timed out waiting for WebSocket connection after {timeout}s.")
+            return False
+
+    async def send_ws_message(self, message: dict):
+        """Sends a JSON message over the WebSocket connection."""
+        if not await self.ensure_ws_connection():
+             logger.error("Cannot send WebSocket message: Connection not ready.")
+             return False
+
+        async with self.lbis_ws_lock:
+            if self.lbis_ws and not self.lbis_ws.closed:
+                try:
+                    await self.lbis_ws.send_json(message)
+                    logger.debug(f"WebSocket message sent: {message}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to send WebSocket message: {e}")
+                    # Assume connection is broken, manager task will handle reconnect
+                    self.lbis_ws = None
+                    self._lbis_ws_ready.clear()
+                    return False
+            else:
+                logger.error("Cannot send WebSocket message: Connection is closed or None.")
+                return False
+
+    # --- End WebSocket Management ---
+
     async def setup_hook(self):
+        # Start the WebSocket manager task
+        self._lbis_ws_manager_task = asyncio.create_task(self._ws_manager())
+
         # Load Cogs
         cogs_dir = "cogs"
         for filename in os.listdir(cogs_dir):
@@ -126,31 +208,19 @@ class lBISBot(commands.Bot):
                 try:
                     await interaction.followup.send("Only the device wearer can use this command.", ephemeral=True)
                 except discord.errors.NotFound:
-                    logger.warning("Could not send CheckFailure followup: Interaction expired or not found.")
-            logger.warning(f"CheckFailure handled for user {interaction.user.id} on command {interaction.command.name if interaction.command else 'unknown'}")
-        elif isinstance(error, app_commands.errors.CommandInvokeError):
-            # Log the original error for debugging
-            original_error = error.original
-            logger.error(f"Error invoking command '{interaction.command.name if interaction.command else 'unknown'}': {original_error}", exc_info=original_error)
-            # Send a generic message to the user
-            if not interaction.response.is_done():
-                await interaction.response.send_message("An unexpected error occurred while running the command.", ephemeral=True)
-            else:
-                try:
-                    await interaction.followup.send("An unexpected error occurred while running the command.", ephemeral=True)
-                except discord.errors.NotFound:
-                    logger.warning("Could not send followup error message: Interaction expired or not found.")
-        else:
-            # Handle other specific app command errors if needed
-            logger.error(f"Unhandled app command error: {error}", exc_info=error)
-            if not interaction.response.is_done():
-                await interaction.response.send_message("An error occurred.", ephemeral=True)
-            else:
-                try:
-                    await interaction.followup.send("An error occurred.", ephemeral=True)
-                except discord.errors.NotFound:
                     logger.warning("Could not send followup error message: Interaction expired or not found.")
 
+    async def close(self):
+        """Gracefully close resources."""
+        logger.info("Closing bot...")
+        if self._lbis_ws_manager_task:
+            self._lbis_ws_manager_task.cancel()
+        async with self.lbis_ws_lock:
+            # Check the renamed attribute and use the correct 'closed' property for aiohttp websockets
+            if self.lbis_ws and not self.lbis_ws.closed:
+                await self.lbis_ws.close()
+                logger.info("lBIS WebSocket connection closed.")
+        await super().close() # Call parent close method
 
 # --- Startup ---
 def start():
@@ -164,11 +234,28 @@ def start():
     # Validation already happened above
 
     try:
+        # Use asyncio.run for better async handling if possible,
+        # but bot.run() handles its own loop.
+        # Ensure graceful shutdown on KeyboardInterrupt or termination signals.
+        # bot.run() blocks, so cleanup needs to be handled carefully,
+        # potentially via signal handlers or ensuring bot.close() is called.
         bot.run(bot_token)
     except discord.errors.LoginFailure:
         print("Failed to log in. Please check your Discord token in bot.json.")
+    except KeyboardInterrupt:
+        print("Bot shutdown requested via KeyboardInterrupt.")
     except Exception as e:
         print(f"An error occurred while running the bot: {e}")
+    finally:
+        # Attempt graceful shutdown if bot object exists
+        if 'bot' in locals() and bot is not None:
+             # Running close() in a new event loop if the main one is stopped/closed
+             try:
+                 asyncio.run(bot.close())
+             except RuntimeError as e:
+                 print(f"Error during final cleanup: {e}")
+
+
 # --- Main Execution ---
 
 if __name__ == "__main__":

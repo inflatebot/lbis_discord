@@ -75,11 +75,12 @@ async def _check_interruptions(bot) -> tuple[bool, str]:
 async def _cleanup_pump_task(bot, actual_run_duration: float, consumed_session_time: int, interruption_reason: str = ""):
     """Handles the common cleanup tasks after a pump loop finishes or is interrupted."""
     logger.info(f"Pump task cleanup. Duration: {actual_run_duration:.2f}s, Consumed Session: {consumed_session_time}s, Reason: '{interruption_reason}'")
-    if await api_request(bot, "setPumpState", method="POST", data={"pump": 0}):
-        logger.info("Pump turned off via API.")
-        bot.last_pump_time = time.time()
+    # Send pump off command via WebSocket
+    if await bot.send_ws_message({"pump": 0.0}):
+        logger.info("Pump turned off via WebSocket.")
+        bot.last_pump_time = time.time() # Keep track of last command time
     else:
-        logger.error("Failed to turn off pump via API during cleanup.")
+        logger.error("Failed to turn off pump via WebSocket during cleanup.")
 
     if consumed_session_time > 0:
         update_session_time(bot, -consumed_session_time)
@@ -258,7 +259,8 @@ async def _start_timed_pump(bot, interaction: discord.Interaction, seconds: int)
             return
 
         logger.info(f"Starting new timed pump for {run_seconds}s at intensity {bot.pump_intensity:.2f}.")
-        if await api_request(bot, "setPumpState", method="POST", data={"pump": bot.pump_intensity}):
+        # Send pump command via WebSocket
+        if await bot.send_ws_message({"pump": bot.pump_intensity}):
             bot.last_pump_time = time.time()
             bot.pump_task_end_time = current_time + run_seconds
             bot.pump_task = asyncio.create_task(_timed_pump_loop(bot, run_seconds))
@@ -270,7 +272,7 @@ async def _start_timed_pump(bot, interaction: discord.Interaction, seconds: int)
 
             await bot.request_status_update()
         else:
-            await interaction.response.send_message("Failed to start pump via API.", ephemeral=True)
+            await interaction.response.send_message("Failed to start pump via WebSocket.", ephemeral=True)
 
 async def _start_banked_pump(bot, interaction: discord.Interaction, seconds: int):
     max_pump_duration = bot.config.get('max_pump_duration', 60)
@@ -306,7 +308,8 @@ async def _start_banked_pump(bot, interaction: discord.Interaction, seconds: int
         return
 
     logger.info(f"Starting banked pump for {run_seconds}s at intensity {bot.pump_intensity:.2f}.")
-    if await api_request(bot, "setPumpState", method="POST", data={"pump": bot.pump_intensity}):
+    # Send pump command via WebSocket
+    if await bot.send_ws_message({"pump": bot.pump_intensity}):
         bot.last_pump_time = time.time()
         bot.pump_task_end_time = asyncio.get_event_loop().time() + run_seconds
         bot.pump_task = asyncio.create_task(_banked_pump_loop(bot, run_seconds))
@@ -318,27 +321,23 @@ async def _start_banked_pump(bot, interaction: discord.Interaction, seconds: int
 
         await bot.request_status_update()
     else:
-        await interaction.response.send_message("Failed to start pump via API.", ephemeral=True)
+        await interaction.response.send_message("Failed to start pump via WebSocket.", ephemeral=True)
 
-async def _send_pump_state_api(bot, interaction: discord.Interaction, intensity: float):
-    """Helper function to send pump state via API, cancelling existing tasks."""
-    # Cancel any running timed pump task first
-    if bot.pump_task and not bot.pump_task.done():
-        # Don't cancel if we're just updating intensity of the running task
-        # We only cancel if intensity is 0.0 (manual off) or if intensity > 0 and task *wasn't* running (manual on)
-        # The intensity command handles updating running tasks separately.
-        # Let's simplify: Always cancel if intensity is 0.0 (explicit off)
-        # If intensity > 0, the calling command should decide if a task needs starting.
-        if intensity == 0.0:
-             bot.pump_task.cancel()
-             logger.info("Cancelled running pump task due to manual pump off.")
-             # Wait briefly for cancellation to potentially process before sending new state
-             await asyncio.sleep(0.1)
-        # If intensity > 0, we assume a new timed/banked task will handle it, or it's an intensity update for a running task.
+async def _send_pump_state_ws(bot, interaction: discord.Interaction | None, intensity: float):
+    """Helper function to send pump state via WebSocket, cancelling existing tasks if needed."""
+    # Cancel any running timed pump task first if turning off manually
+    if intensity == 0.0 and bot.pump_task and not bot.pump_task.done():
+        bot.pump_task.cancel()
+        logger.info("Cancelled running pump task due to manual pump off.")
+        # Wait briefly for cancellation to potentially process before sending new state
+        await asyncio.sleep(0.1)
+    # If intensity > 0, we assume a new timed/banked task will handle it,
+    # or it's an intensity update for a running task (handled in pump_intensity command).
 
-    if await api_request(bot, "setPumpState", method="POST", data={"pump": intensity}):
+    # Send the command via WebSocket
+    if await bot.send_ws_message({"pump": intensity}):
         bot.last_pump_time = time.time()
-        # DO NOT update bot.pump_intensity here
+        # DO NOT update bot.pump_intensity here (handled by pump_intensity command)
         # DO NOT save_session_state here
         state_str = "OFF" if intensity == 0.0 else f"ON (Intensity: {intensity:.2f})"
         # Avoid sending response if interaction already responded (e.g., in pump_intensity)
@@ -350,9 +349,9 @@ async def _send_pump_state_api(bot, interaction: discord.Interaction, intensity:
         return True # Indicate success
     else:
         if interaction and not interaction.response.is_done():
-            await interaction.response.send_message("Failed to set pump state via API.", ephemeral=True)
+            await interaction.response.send_message("Failed to set pump state via WebSocket.", ephemeral=True)
         elif not interaction:
-            logger.error("Failed to set pump state via API (no interaction response).") # Log if no interaction
+            logger.error("Failed to set pump state via WebSocket (no interaction response).") # Log if no interaction
         return False # Indicate failure
 
 # --- Pump Command Group --- #
@@ -366,15 +365,15 @@ class PumpGroup(app_commands.Group):
     @check_is_privileged()
     @dm_wearer_on_use("pump on")
     async def pump_on(self, interaction: discord.Interaction):
-        # Use the stored intensity, call the API helper
-        await _send_pump_state_api(self.bot, interaction, self.bot.pump_intensity)
+        # Use the stored intensity, call the WS helper
+        await _send_pump_state_ws(self.bot, interaction, self.bot.pump_intensity)
 
     @app_commands.command(name="off", description="[Privileged Only] Manually turns the pump OFF.")
     @check_is_privileged()
     @dm_wearer_on_use("pump off")
     async def pump_off(self, interaction: discord.Interaction):
-        # Send intensity 0.0 using the API helper
-        await _send_pump_state_api(self.bot, interaction, 0.0)
+        # Send intensity 0.0 using the WS helper
+        await _send_pump_state_ws(self.bot, interaction, 0.0)
 
     @app_commands.command(name="intensity", description="[Privileged Only] Sets the default pump intensity (0.0 to 1.0).")
     @check_is_privileged()
@@ -397,16 +396,16 @@ class PumpGroup(app_commands.Group):
         # A simple check is if the last API call wasn't to turn it off (intensity 0)
         # Or better: check if a timed/banked task is active.
         if self.bot.pump_task and not self.bot.pump_task.done():
-            logger.info(f"Pump task is running. Updating current intensity to {intensity:.2f} via API.")
-            # Call API helper to change the intensity of the currently running pump
+            logger.info(f"Pump task is running. Updating current intensity to {intensity:.2f} via WebSocket.")
+            # Call WS helper to change the intensity of the currently running pump
             # Pass interaction=None to prevent double response
-            if await _send_pump_state_api(self.bot, None, intensity):
+            if await _send_pump_state_ws(self.bot, None, intensity):
                 logger.info(f"Successfully updated running pump intensity to {intensity:.2f}.")
                 response_message += f"\nApplied intensity {intensity:.2f} to the currently running pump."
             else:
-                logger.error(f"Failed to update running pump intensity to {intensity:.2f} via API.")
-                response_message += "\n⚠️ Failed to apply intensity to the currently running pump (API error)."
-                api_success = False
+                logger.error(f"Failed to update running pump intensity to {intensity:.2f} via WebSocket.")
+                response_message += "\n⚠️ Failed to apply intensity to the currently running pump (WebSocket error)."
+                api_success = False # Use api_success flag for consistency, even though it's WS
         # If no task is running, the new intensity will just be used next time pump turns on.
 
         await interaction.response.send_message(response_message, ephemeral=True)
