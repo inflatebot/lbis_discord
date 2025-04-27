@@ -60,7 +60,7 @@ class LatchGroup(app_commands.Group):
         if success:
             await self.bot.request_status_update()
 
-# --- Helper Functions (moved from old InflateGroup) ---
+# --- Helper Functions ---
 
 async def _check_interruptions(bot) -> tuple[bool, str]:
     """Checks for conditions that should interrupt the pump loop."""
@@ -320,30 +320,40 @@ async def _start_banked_pump(bot, interaction: discord.Interaction, seconds: int
     else:
         await interaction.response.send_message("Failed to start pump via API.", ephemeral=True)
 
-async def _set_pump_intensity(bot, interaction: discord.Interaction, intensity: float):
-    """Helper function to set pump intensity via API and update state."""
+async def _send_pump_state_api(bot, interaction: discord.Interaction, intensity: float):
+    """Helper function to send pump state via API, cancelling existing tasks."""
     # Cancel any running timed pump task first
     if bot.pump_task and not bot.pump_task.done():
-        bot.pump_task.cancel()
-        logger.info("Cancelled running pump task due to manual intensity change.")
-        # Wait briefly for cancellation to potentially process before sending new state
-        await asyncio.sleep(0.1)
+        # Don't cancel if we're just updating intensity of the running task
+        # We only cancel if intensity is 0.0 (manual off) or if intensity > 0 and task *wasn't* running (manual on)
+        # The intensity command handles updating running tasks separately.
+        # Let's simplify: Always cancel if intensity is 0.0 (explicit off)
+        # If intensity > 0, the calling command should decide if a task needs starting.
+        if intensity == 0.0:
+             bot.pump_task.cancel()
+             logger.info("Cancelled running pump task due to manual pump off.")
+             # Wait briefly for cancellation to potentially process before sending new state
+             await asyncio.sleep(0.1)
+        # If intensity > 0, we assume a new timed/banked task will handle it, or it's an intensity update for a running task.
 
     if await api_request(bot, "setPumpState", method="POST", data={"pump": intensity}):
         bot.last_pump_time = time.time()
-        bot.pump_intensity = intensity  # Update bot state
-        save_session_state(bot)
+        # DO NOT update bot.pump_intensity here
+        # DO NOT save_session_state here
         state_str = "OFF" if intensity == 0.0 else f"ON (Intensity: {intensity:.2f})"
-        await interaction.response.send_message(f"Pump set to {state_str}.", ephemeral=True)
+        # Avoid sending response if interaction already responded (e.g., in pump_intensity)
+        if interaction and not interaction.response.is_done():
+            await interaction.response.send_message(f"Pump set to {state_str}.", ephemeral=True)
+        elif not interaction:
+             logger.info(f"Pump set to {state_str} (no interaction response).") # Log if no interaction
         await bot.request_status_update()
+        return True # Indicate success
     else:
-        await interaction.response.send_message("Failed to set pump intensity via API.", ephemeral=True)
-
-async def _start_manual_pump(bot, interaction: discord.Interaction):
-    await _set_pump_intensity(bot, interaction, 1.0)
-
-async def _stop_manual_pump(bot, interaction: discord.Interaction):
-    await _set_pump_intensity(bot, interaction, 0.0)
+        if interaction and not interaction.response.is_done():
+            await interaction.response.send_message("Failed to set pump state via API.", ephemeral=True)
+        elif not interaction:
+            logger.error("Failed to set pump state via API (no interaction response).") # Log if no interaction
+        return False # Indicate failure
 
 # --- Pump Command Group --- #
 
@@ -352,19 +362,19 @@ class PumpGroup(app_commands.Group):
         super().__init__(name="pump", description="[Privileged Only] Manually control the pump.")
         self.bot = bot
 
-    @app_commands.command(name="on", description="[Privileged Only] Manually turns the pump ON.")
+    @app_commands.command(name="on", description="[Privileged Only] Manually turns the pump ON using the stored intensity.")
     @check_is_privileged()
     @dm_wearer_on_use("pump on")
     async def pump_on(self, interaction: discord.Interaction):
-        # Use the stored intensity
-        await _set_pump_intensity(self.bot, interaction, self.bot.pump_intensity)
+        # Use the stored intensity, call the API helper
+        await _send_pump_state_api(self.bot, interaction, self.bot.pump_intensity)
 
     @app_commands.command(name="off", description="[Privileged Only] Manually turns the pump OFF.")
     @check_is_privileged()
     @dm_wearer_on_use("pump off")
     async def pump_off(self, interaction: discord.Interaction):
-        # Keep this setting intensity to 0.0 explicitly
-        await _set_pump_intensity(self.bot, interaction, 0.0)
+        # Send intensity 0.0 using the API helper
+        await _send_pump_state_api(self.bot, interaction, 0.0)
 
     @app_commands.command(name="intensity", description="[Privileged Only] Sets the default pump intensity (0.0 to 1.0).")
     @check_is_privileged()
@@ -379,22 +389,31 @@ class PumpGroup(app_commands.Group):
         self.bot.pump_intensity = intensity
         save_session_state(self.bot)
         logger.info(f"Pump intensity set to {intensity:.2f} by {interaction.user}.")
-        response_message = f"Pump intensity set to {intensity:.2f}."
+        response_message = f"Default pump intensity set to {intensity:.2f}."
+        api_success = True # Assume success unless API call fails
 
-        # Check if a pump task is currently running
+        # Check if a pump task is currently running *or* if the pump might be manually on
+        # We should update the pump's current state if it's supposed to be running
+        # A simple check is if the last API call wasn't to turn it off (intensity 0)
+        # Or better: check if a timed/banked task is active.
         if self.bot.pump_task and not self.bot.pump_task.done():
             logger.info(f"Pump task is running. Updating current intensity to {intensity:.2f} via API.")
-            # Call API to change the intensity of the currently running pump
-            if await api_request(self.bot, "setPumpState", method="POST", data={"pump": intensity}):
+            # Call API helper to change the intensity of the currently running pump
+            # Pass interaction=None to prevent double response
+            if await _send_pump_state_api(self.bot, None, intensity):
                 logger.info(f"Successfully updated running pump intensity to {intensity:.2f}.")
                 response_message += f"\nApplied intensity {intensity:.2f} to the currently running pump."
             else:
                 logger.error(f"Failed to update running pump intensity to {intensity:.2f} via API.")
                 response_message += "\n⚠️ Failed to apply intensity to the currently running pump (API error)."
+                api_success = False
+        # If no task is running, the new intensity will just be used next time pump turns on.
 
         await interaction.response.send_message(response_message, ephemeral=True)
-        # Update status in case it reflects intensity
-        await self.bot.request_status_update()
+        # Request status update regardless of API success for the running pump,
+        # as the default intensity definitely changed.
+        if api_success: # Only request update if API call succeeded or wasn't needed
+             await self.bot.request_status_update()
 
 # --- Standalone Commands --- #
 
