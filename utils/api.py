@@ -80,30 +80,26 @@ async def get_api_pump_state(bot: 'lBISBot') -> Optional[bool]:
             logger.warning("get_api_pump_state: API request returned None")
             return None
 
-        # Handle potential text response first (API returns float string like "0.00", "0.50")
-        if 'message' in response_data:
-            text_value = response_data['message']
+        # Expect {"state": float_value} from api_request now
+        if 'state' in response_data:
+            state_value = response_data['state']
             try:
-                # Parse as float and check if > 0
-                return float(text_value) > 0.0
-            except (ValueError, TypeError):
-                logger.error(f"get_api_pump_state: Could not parse text response '{text_value}' as float.")
+                # Ensure state_value is treated as a float
+                pump_value = float(state_value)
+                return pump_value > 0.0
+            except (ValueError, TypeError) as parse_error:
+                # Log the specific parsing error
+                logger.error(f"get_api_pump_state: Could not parse state value '{state_value}' as float: {parse_error}")
                 return None
-        # Handle potential numeric response (from api_request parsing - less likely now)
-        elif 'value' in response_data:
-             try:
-                 # Check if numeric value > 0
-                return float(response_data['value']) > 0.0
-             except (ValueError, TypeError):
-                logger.error(f"get_api_pump_state: Could not parse numeric value '{response_data['value']}' as float.")
-                return None
-        # Handle potential JSON response as fallback (unlikely for this endpoint now)
-        elif 'is_on' in response_data: # Keep for potential future API changes
-            return bool(response_data.get('is_on'))
+        # Keep fallback for potential future API changes
+        elif 'is_on' in response_data:
+             return bool(response_data.get('is_on'))
         else:
-            logger.error(f"get_api_pump_state: Unexpected API response format: {response_data}")
+            # Log if the expected 'state' key is missing
+            logger.error(f"get_api_pump_state: Unexpected API response format (expected 'state'): {response_data}")
             return None
 
     except Exception as e:
-        logger.error(f"get_api_pump_state: Failed to check pump status: {e}")
+        # Catch any other unexpected error during the process
+        logger.error(f"get_api_pump_state: Failed to check pump status: {e}", exc_info=True) # Add exc_info for traceback
         return None
